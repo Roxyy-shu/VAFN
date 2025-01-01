@@ -2,19 +2,16 @@
 
 <div align="center">
   
-[📘 Introduction](#intro) |
-[🛠️ Data Preparation](#preparation) |
-[💪 Training and Evaluation](#training) |
-[📖 Citation](#citation) |
-[📝 License](#license)
+[Introduction](#intro) |
+[Data Preparation](#preparation) |
 </div>
 <!-- 
 <div align="center">  -->
 
-## <a name="intro"></a> 📘 Introduction
+## <a name="intro"></a>Introduction
 *Depression is a serious mental health disease. Traditional scale-based depression diagnosis methods often have problems of strong subjectivity and high misdiagnosis rate, so it is particularly important to develop automatic diagnostic tools based on objective indicators. This study proposes a deep learning method that fuses multimodal data to automatically diagnose depression using facial video and audio data. We use spatiotemporal attention module to enhance the extraction of visual features and combine the Graph Convolutional Network (GCN) and the Long and Short Term Memory (LSTM) to analyze the audio features. Through the multi-modal feature fusion, the model can effectively capture different feature patterns related to depression. We conduct extensive experiments on the publicly available clinical dataset, the Extended Distress Analysis Interview Corpus (E-DAIC).*
 
-## <a name="preparation"></a> 🛠️ Data Preparation
+## <a name="preparation"></a> Data
 
 ### Downloading the datasets
 
@@ -40,12 +37,4 @@ deactivate
 ### Implementation Detail
 
 Once all the data has been pre-processed, you should indicate the absule path to the directory where it is stored
-in the 'configs/env_config.yaml' file for each one of the corresponding datasets.
-
-## <a name="training"></a> 💪 Training and Evaluation
-To train and evaluate the models and the results reported in the paper, you can run the following commands:
-
-```
-cd experiments/
-bash run-exps.sh
-```
+in the 'configs/env_config.yaml' file for each one of the corresponding datasets
