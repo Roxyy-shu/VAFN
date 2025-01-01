@@ -1,0 +1,243 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as FF
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+
+
+class TemporalAttentionModule(nn.Module):
+    def __init__(self, in_channels):
+        super(TemporalAttentionModule, self).__init__()
+        self.global_avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.global_max_pool = nn.AdaptiveMaxPool3d(1)
+        self.fc1 = nn.Linear(in_channels, in_channels // 16)
+        self.fc2 = nn.Linear(in_channels // 16, in_channels)
+
+    def forward(self, F_v):
+        avg_pooled = self.global_avg_pool(F_v).view(F_v.size(0), -1)
+        max_pooled = self.global_max_pool(F_v).view(F_v.size(0), -1)
+
+        avg_out = FF.relu(self.fc1(avg_pooled))
+        avg_out = self.fc2(avg_out)
+
+        max_out = FF.relu(self.fc1(max_pooled))
+        max_out = self.fc2(max_out)
+
+        combined_features = avg_out + max_out
+        W_t = torch.sigmoid(combined_features)
+        
+        F_t = F_v * W_t.view(W_t.size(0), W_t.size(1), 1, 1, 1)
+        
+        return F_t
+
+class SpatialAttentionModule(nn.Module):
+    def __init__(self, in_channels):
+        super(SpatialAttentionModule, self).__init__()
+        self.conv = nn.Conv3d(in_channels * 2, 1, kernel_size=7, padding=3)
+
+    def forward(self, F_v):
+        avg_pooled = FF.adaptive_avg_pool3d(F_v, (F_v.size(2), F_v.size(3)))
+        max_pooled = FF.adaptive_max_pool3d(F_v, (F_v.size(2), F_v.size(3)))
+
+        pooled_concat = torch.cat((avg_pooled, max_pooled), dim=1)
+        
+        W_s = torch.sigmoid(self.conv(pooled_concat))
+        
+        F_s = F_v * W_s
+        
+        return F_s
+
+class FusionModule(nn.Module):
+    def __init__(self, in_channels):
+        super(FusionModule, self).__init__()
+        self.tam = TemporalAttentionModule(in_channels)
+        self.sam = SpatialAttentionModule(in_channels)
+
+    def forward(self, F_v):
+
+        F_t = self.tam(F_v)
+        F_s = self.sam(F_v)
+        F_ts = F_t + F_s
+        
+        return F_ts
+
+
+class BasicBlock(nn.Module):
+    """Basic Block for ResNet."""
+    expansion = 1
+
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(BasicBlock, self).__init__()
+        self.TSblock1 = FusionModule(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm3d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.TSblock2 = FusionModule(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm3d(out_channels)
+        
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
+
+    def forward(self, x):
+        identity = x
+        out = self.TSblock1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.TSblock2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+    
+
+class TSNetDD(nn.Module):
+    def __init__(self, num_classes=2):
+        super(TSNetDD, self).__init__()
+        
+        # Initial convolution layer
+        self.initial_conv = nn.Conv3d(3, 64, kernel_size=7, stride=(1, 2, 2), padding=3)  # Assuming input is (N,C,H,W,D)
+
+        self.pool1 = nn.MaxPool3d(kernel_size=3, stride=(1, 2, 2), padding=1)
+
+        self.module1 = self._make_layer(BasicBlock, 64, 2)   
+        self.module2 = self._make_layer(BasicBlock, 128, 2)  
+        self.module3 = self._make_layer(BasicBlock, 256, 6)  
+        self.module4 = self._make_layer(BasicBlock, 512, 3)   
+        
+        # Final pooling and fully connected layer
+        self.pool_final = nn.AdaptiveAvgPool3d((1, 1, 1))
+        self.fc = nn.Linear(512 * BasicBlock.expansion, num_classes)
+
+    def _make_layer(self, block, out_channels, blocks):
+        layers = []
+        for _ in range(blocks):
+            layers.append(block(64 if len(layers) == 0 else out_channels // BasicBlock.expansion,
+                                out_channels))
+            if len(layers) == 0:
+                layers.append(FusionModule(out_channels))  # Add TSAM after the first block
+            else:
+                layers.append(FusionModule(out_channels)) 
+                
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.initial_conv(x)
+        x = self.pool1(x)
+
+        x = self.module1(x)
+        x = self.module2(x)
+        x = self.module3(x)
+        x = self.module4(x)
+
+        x = self.pool_final(x)
+        x = torch.flatten(x, 1)  
+        y = self.fc(x)
+
+        return x, y
+    
+
+
+
+
+# video
+def Graph(mfcc_features, threshold=0.5):
+    dist_matrix = squareform(pdist(mfcc_features))
+    adjacency_matrix = (dist_matrix < threshold).astype(float)
+    np.fill_diagonal(adjacency_matrix, 0) 
+    weights = np.where(adjacency_matrix > 0, 1 / (dist_matrix + 1e-6), 0)  # Avoid division by zero
+    return adjacency_matrix, weights
+
+class GCL(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(GCL, self).__init__()
+        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.weight)
+
+    def forward(self, adjacency_matrix, features):
+        support = torch.matmul(features, self.weight)
+        output = torch.matmul(adjacency_matrix, support)
+        return output
+
+
+class GCN(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(GCN, self).__init__()
+        self.gc1 = GCL(input_dim, hidden_dim)
+        self.gc2 = GCL(hidden_dim, hidden_dim)
+
+    def forward(self, adjacency_matrix, features):
+        x = FF.relu(self.gc1(adjacency_matrix, features))
+        x = self.gc2(adjacency_matrix, x)
+        return x
+
+
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(LSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+    
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return out[:, -1] 
+
+
+class Vediobranch(nn.Module):
+    def __init__(self, gcn_input_dim, lstm_input_dim, hidden_dim=64):
+        super(Vediobranch, self).__init__()
+        self.gcn = GCN(gcn_input_dim, hidden_dim)
+        self.lstm = LSTM(lstm_input_dim, hidden_dim)
+        self.fc = nn.Linear(hidden_dim * 2, 1)  
+
+    def forward(self, adjacency_matrix, gcn_features, lstm_input):
+        gcn_out = self.gcn(adjacency_matrix.float(), gcn_features.float())
+        x = self.lstm(lstm_input.float())
+        
+        combined = torch.cat((gcn_out.mean(dim=0), x), dim=1)  
+        y = torch.sigmoid(self.fc(combined))
+        
+        return y, x
+
+
+# multi modality
+class VAFN(nn.Module):
+    def __init__(self, visual_dim, audio_dim, hidden_dim=128):
+        super(VAFN, self).__init__()
+        
+       
+        self.fc = nn.Linear(audio_dim, hidden_dim)
+        self.classifier = nn.Linear(hidden_dim, 1)  # Binary classification
+
+    def forward(self, F_V, F_A):
+        if F_V.size(1) < F_A.size(1): 
+            padding = (0, F_A.size(1) - F_V.size(1)) 
+            F_VP = FF.pad(F_V, padding)
+            F_AP = F_A
+        else:
+            padding = (0, F_V.size(1) - F_A.size(1)) 
+            F_AP = FF.pad(F_A, padding)
+            F_VP = F_V
+
+        H_VA = torch.cat((F_VP, F_AP), dim=1) 
+        V_VA = H_VA.view(H_VA.size(0), -1) 
+        
+
+        V_VAF = self.fc(V_VA) 
+        V_VAF = torch.sigmoid(V_VAF) 
+
+        F_VA = H_VA * V_VAF.unsqueeze(1).unsqueeze(2)  
+        
+        pooled_features = FF.max_pool2d(F_VA, kernel_size=F_VA.size()[2:]) 
+        pooled_features = pooled_features.view(pooled_features.size(0), -1) 
+        
+        output = self.classifier(pooled_features)
+        
+        return output
